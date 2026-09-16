@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#FFF9F4" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="さんぎょう日記" />
+<title>さんぎょう日記</title>
+<style>
+  html, body { margin:0; padding:0; background:#FFF9F4; }
+  #root { min-height:100vh; }
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+/* ---------- ほぞん場所（この端末のブラウザ内） ---------- */
+window.storage = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    return v === null ? null : { key, value: v };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+  async delete(key) {
+    localStorage.removeItem(key);
+    return { key, deleted: true };
+  },
+  async list(prefix = "") {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith(prefix)) keys.push(k);
+    }
+    return { keys, prefix };
+  },
+};
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ------------------------------------------------------------------ *
+ *  さんぎょう日記  —  一日を三行だけ。写真を一枚だけ。
+ * ------------------------------------------------------------------ */
+
+const WEEK = ["日", "月", "火", "水", "木", "金", "土"];
+const SEEDS = ["🌷", "🍮", "☁️", "🍋", "🐑", "🫧", "🌿", "🍓"];
+
+const todayKey = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+const parseKey = (key) => {
+  const [y, m, d] = key.split("-").map(Number);
+  return { y, m, d, w: WEEK[new Date(y, m - 1, d).getDay()] };
+};
+
+const PROMPTS = [
+  { icon: "🌸", label: "よかった・うれしかった・感謝", ph: "小さなことでも" },
+  { icon: "☀️", label: "今日なにしてた", ph: "したこと、会った人" },
+  { icon: "🌧", label: "思い悩んだこと", ph: "ひっかかっていること" },
+];
+
+const pad = (n) => String(n).padStart(2, "0");
+
+const buildCells = ({ y, m }) => {
+  const lead = new Date(y, m - 1, 1).getDay();
+  const days = new Date(y, m, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push(null);
+  for (let d = 1; d <= days; d++) cells.push(d);
+  return cells;
+};
+
+const monthCount = (entries, { y, m }) =>
+  entries.filter((e) => e.date.startsWith(`${y}-${pad(m)}`)).length;
+
+const seedFor = (key) => {
+  let n = 0;
+  for (let i = 0; i < key.length; i++) n += key.charCodeAt(i);
+  return SEEDS[n % SEEDS.length];
+};
+
+/* ---------- ほぞん ---------- */
+
+const INDEX_KEY = "diary:index";
+const photoKey = (id) => `diary:photo:${id}`;
+
+async function readIndex() {
+  try {
+    const r = await window.storage.get(INDEX_KEY);
+    return r ? JSON.parse(r.value) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function writeIndex(entries) {
+  await window.storage.set(INDEX_KEY, JSON.stringify(entries));
+}
+
+/* ---------- しゃしん ---------- */
+
+function shrink(file, max, quality) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("decode"));
+      img.onload = () => {
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        const ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ---------- ちいさな部品 ---------- */
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function highlight(text, query) {
+  if (!query || !text) return text || "\u00a0";
+  const parts = text.split(new RegExp(`(${escapeRe(query)})`, "gi"));
+  return parts.map((p, i) =>
+    p.toLowerCase() === query.toLowerCase() ? <mark key={i}>{p}</mark> : <span key={i}>{p}</span>
+  );
+}
+
+function Line({ index, value, onChange }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }, [value]);
+
+  const p = PROMPTS[index];
+
+  return (
+    <div className={`line line-${index}`}>
+      <span className="tag">
+        <i aria-hidden="true">{p.icon}</i>
+        {p.label}
+      </span>
+      <textarea
+        ref={ref}
+        rows={1}
+        className="line-input"
+        value={value}
+        maxLength={120}
+        placeholder={p.ph}
+        onChange={(e) => onChange(e.target.value.replace(/\n/g, ""))}
+      />
+    </div>
+  );
+}
+
+function DateChip({ dateKey, onPick }) {
+  const { y, m, d, w } = parseKey(dateKey);
+  const inputRef = useRef(null);
+  return (
+    <div className="chip-wrap">
+      <button
+        type="button"
+        className="chip"
+        onClick={() => {
+          const el = inputRef.current;
+          if (!el) return;
+          if (el.showPicker) el.showPicker();
+          else el.click();
+        }}
+      >
+        <span className="chip-day">{d}</span>
+        <span className="chip-meta">
+          <b>
+            {y}年 {m}月
+          </b>
+          <i>{w}よう日</i>
+        </span>
+        <span className="chip-seed" aria-hidden="true">
+          {seedFor(dateKey)}
+        </span>
+      </button>
+      <input
+        ref={inputRef}
+        type="date"
+        className="chip-input"
+        value={dateKey}
+        max={todayKey()}
+        onChange={(e) => e.target.value && onPick(e.target.value)}
+        aria-label="日付を選ぶ"
+      />
+    </div>
+  );
+}
+
+/* ---------- ほんたい ---------- */
+
+function App() {
+  const [entries, setEntries] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [tab, setTab] = useState("write");
+
+  const [dateKey, setDateKey] = useState(todayKey());
+  const [lines, setLines] = useState(["", "", ""]);
+  const [thumb, setThumb] = useState(null);
+  const [full, setFull] = useState(null);
+  const [photoDirty, setPhotoDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [notice, setNotice] = useState(null);
+
+  const [month, setMonth] = useState(() => {
+    const d = new Date();
+    return { y: d.getFullYear(), m: d.getMonth() + 1 };
+  });
+  const [picked, setPicked] = useState(null);
+  const [pickedPhoto, setPickedPhoto] = useState(null);
+
+  const [query, setQuery] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const [openPhoto, setOpenPhoto] = useState(null);
+  const [confirmId, setConfirmId] = useState(null);
+
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      const list = await readIndex();
+      setEntries(list);
+      setReady(true);
+    })();
+  }, []);
+
+  const flash = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2200);
+  };
+
+  const loadDate = useCallback(
+    async (key) => {
+      setDateKey(key);
+      const found = entries.find((e) => e.date === key);
+      setLines(found ? [...found.lines] : ["", "", ""]);
+      setThumb(found?.thumb || null);
+      setPhotoDirty(false);
+      setFull(null);
+      if (found?.hasPhoto) {
+        try {
+          const r = await window.storage.get(photoKey(found.id));
+          if (r) setFull(r.value);
+        } catch (e) {
+          /* 縮小版があれば表示できる */
+        }
+      }
+    },
+    [entries]
+  );
+
+  useEffect(() => {
+    if (ready) loadDate(dateKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  const pickPhoto = async (file) => {
+    if (!file) return;
+    try {
+      const [big, small] = await Promise.all([shrink(file, 1000, 0.7), shrink(file, 160, 0.5)]);
+      setFull(big);
+      setThumb(small);
+      setPhotoDirty(true);
+    } catch (e) {
+      setNotice("この画像は読みこめませんでした。ほかの写真で試してみてください。");
+    }
+  };
+
+  const removePhoto = () => {
+    setFull(null);
+    setThumb(null);
+    setPhotoDirty(true);
+  };
+
+  const save = async () => {
+    if (!lines.some((l) => l.trim())) {
+      setNotice("一行でも書けば保存できます。");
+      return;
+    }
+    setSaving(true);
+    setNotice(null);
+    const existing = entries.find((e) => e.date === dateKey);
+    const id = existing?.id || `${dateKey}-${Math.random().toString(36).slice(2, 7)}`;
+    const entry = {
+      id,
+      date: dateKey,
+      lines: lines.map((l) => l.trim()),
+      thumb: thumb || null,
+      hasPhoto: !!full,
+      savedAt: Date.now(),
+    };
+    const next = [...entries.filter((e) => e.date !== dateKey), entry].sort((a, b) =>
+      a.date < b.date ? 1 : -1
+    );
+    try {
+      if (photoDirty) {
+        if (full) await window.storage.set(photoKey(id), full);
+        else await window.storage.delete(photoKey(id)).catch(() => {});
+      }
+      await writeIndex(next);
+      setEntries(next);
+      setPhotoDirty(false);
+      flash(existing ? "書きなおしました" : "保存しました");
+    } catch (e) {
+      setNotice("保存できませんでした。端末の保存容量がいっぱいかもしれません。写真を外すか、古い日記を減らしてみてください。");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (entry) => {
+    const next = entries.filter((e) => e.id !== entry.id);
+    try {
+      if (entry.hasPhoto) await window.storage.delete(photoKey(entry.id)).catch(() => {});
+      await writeIndex(next);
+      setEntries(next);
+      setConfirmId(null);
+      setOpenId(null);
+      if (entry.date === dateKey) loadDate(dateKey);
+      flash("消しました");
+    } catch (e) {
+      setNotice("消せませんでした。もう一度おためしください。");
+    }
+  };
+
+  const openEntry = async (entry) => {
+    if (openId === entry.id) {
+      setOpenId(null);
+      setOpenPhoto(null);
+      return;
+    }
+    setOpenId(entry.id);
+    setOpenPhoto(null);
+    setConfirmId(null);
+    if (entry.hasPhoto) {
+      try {
+        const r = await window.storage.get(photoKey(entry.id));
+        if (r) setOpenPhoto(r.value);
+      } catch (e) {
+        setOpenPhoto(entry.thumb || null);
+      }
+    }
+  };
+
+  const byDate = {};
+  entries.forEach((e) => {
+    byDate[e.date] = e;
+  });
+
+  const shiftMonth = (delta) => {
+    setPicked(null);
+    setPickedPhoto(null);
+    setMonth(({ y, m }) => {
+      const n = m + delta;
+      if (n < 1) return { y: y - 1, m: 12 };
+      if (n > 12) return { y: y + 1, m: 1 };
+      return { y, m: n };
+    });
+  };
+
+  const selectDay = async (key) => {
+    setConfirmId(null);
+    if (picked === key) {
+      setPicked(null);
+      setPickedPhoto(null);
+      return;
+    }
+    setPicked(key);
+    setPickedPhoto(null);
+    const entry = byDate[key];
+    if (entry?.hasPhoto) {
+      try {
+        const r = await window.storage.get(photoKey(entry.id));
+        if (r) setPickedPhoto(r.value);
+      } catch (e) {
+        setPickedPhoto(entry.thumb || null);
+      }
+    }
+  };
+
+  const q = query.trim();
+  const filtered = q
+    ? entries.filter((e) => e.lines.join(" ").toLowerCase().includes(q.toLowerCase()))
+    : entries;
+
+  const groups = [];
+  filtered.forEach((e) => {
+    const { y, m } = parseKey(e.date);
+    const label = `${y}年 ${m}月`;
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.items.push(e);
+    else groups.push({ label, items: [e] });
+  });
+
+  return (
+    <div className="app">
+      <style>{CSS}</style>
+
+      <header className="head">
+        <h1 className="brand">
+          <span className="brand-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          さんぎょう日記
+        </h1>
+        <p className="brand-sub">一日を、三行だけ</p>
+
+        <nav className="tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={tab === "write"}
+            className={`tab ${tab === "write" ? "on" : ""}`}
+            onClick={() => setTab("write")}
+          >
+            かく
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "review"}
+            className={`tab ${tab === "review" ? "on" : ""}`}
+            onClick={() => setTab("review")}
+          >
+            ふりかえる
+          </button>
+        </nav>
+      </header>
+
+      {tab === "write" ? (
+        <main className="sheet">
+          <DateChip dateKey={dateKey} onPick={loadDate} />
+
+          {lines.map((v, i) => (
+            <Line
+              key={i}
+              index={i}
+              value={v}
+              onChange={(val) => setLines((prev) => prev.map((p, j) => (j === i ? val : p)))}
+            />
+          ))}
+
+          {full || thumb ? (
+            <figure className="photo">
+              <img src={full || thumb} alt="この日の写真" />
+              <button type="button" className="photo-remove" onClick={removePhoto}>
+                はずす
+              </button>
+            </figure>
+          ) : (
+            <button
+              type="button"
+              className="photo-add"
+              onClick={() => fileRef.current && fileRef.current.click()}
+            >
+              <span aria-hidden="true">📷</span> 写真を一枚そえる
+            </button>
+          )}
+
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden-input"
+            onChange={(e) => {
+              pickPhoto(e.target.files && e.target.files[0]);
+              e.target.value = "";
+            }}
+          />
+
+          {notice && <p className="notice">{notice}</p>}
+
+          <button type="button" className="save" onClick={save} disabled={saving}>
+            {saving ? "保存中…" : "保存"}
+          </button>
+        </main>
+      ) : (
+        <main className="review">
+          <div className="search">
+            <span className="search-icon" aria-hidden="true">
+              🔍
+            </span>
+            <input
+              type="search"
+              value={query}
+              placeholder="ことばで さがす"
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="日記をさがす"
+            />
+          </div>
+
+          {q ? (
+            <>
+              <p className="count">{filtered.length}こ 見つかりました</p>
+              {filtered.length === 0 ? (
+                <p className="empty">
+                  <span aria-hidden="true">🫧</span>
+                  <br />
+                  そのことばは、まだどこにもありません。
+                </p>
+              ) : (
+                groups.map((g) => (
+                  <section key={g.label} className="group">
+                    <h2 className="group-label">{g.label}</h2>
+                    {g.items.map((e) => {
+                      const { m, d, w } = parseKey(e.date);
+                      return (
+                        <article key={e.id} className="card">
+                          <button
+                            type="button"
+                            className="card-head"
+                            onClick={() => {
+                              setQuery("");
+                              setMonth({ y: parseKey(e.date).y, m });
+                              selectDay(e.date);
+                            }}
+                          >
+                            <span className="card-date">
+                              <b>{d}</b>
+                              <i>
+                                {m}月 {w}
+                              </i>
+                            </span>
+                            <span className="card-lines">
+                              {e.lines.map((l, i) =>
+                                l ? (
+                                  <span key={i} className="card-line">
+                                    <i className="mini" aria-hidden="true">
+                                      {PROMPTS[i].icon}
+                                    </i>
+                                    {highlight(l, q)}
+                                  </span>
+                                ) : null
+                              )}
+                            </span>
+                            {e.thumb ? (
+                              <img className="card-thumb" src={e.thumb} alt="" />
+                            ) : (
+                              <span className="card-seed" aria-hidden="true">
+                                {seedFor(e.date)}
+                              </span>
+                            )}
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </section>
+                ))
+              )}
+            </>
+          ) : (
+            <>
+              <div className="cal-head">
+                <button type="button" className="cal-arrow" onClick={() => shiftMonth(-1)} aria-label="前の月">
+                  ‹
+                </button>
+                <h2 className="cal-title">
+                  {month.y}年 <b>{month.m}</b>月
+                </h2>
+                <button type="button" className="cal-arrow" onClick={() => shiftMonth(1)} aria-label="次の月">
+                  ›
+                </button>
+              </div>
+
+              <div className="cal">
+                <div className="cal-week">
+                  {WEEK.map((w) => (
+                    <span key={w} className={`cal-wd wd-${w}`}>
+                      {w}
+                    </span>
+                  ))}
+                </div>
+                <div className="cal-grid">
+                  {buildCells(month).map((d, i) => {
+                    if (!d) return <span key={`b${i}`} className="cal-blank" />;
+                    const key = `${month.y}-${pad(month.m)}-${pad(d)}`;
+                    const entry = byDate[key];
+                    const isToday = key === todayKey();
+                    const future = key > todayKey();
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={future}
+                        className={`cal-day ${entry ? "has" : ""} ${isToday ? "today" : ""} ${
+                          picked === key ? "picked" : ""
+                        }`}
+                        onClick={() => selectDay(key)}
+                      >
+                        <span className="cal-num">{d}</span>
+                        {entry &&
+                          (entry.thumb ? (
+                            <img className="cal-thumb" src={entry.thumb} alt="" />
+                          ) : (
+                            <span className="cal-seed" aria-hidden="true">
+                              {seedFor(key)}
+                            </span>
+                          ))}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <p className="count">
+                {monthCount(entries, month)}日 書きました（ぜんぶで {entries.length}日）
+              </p>
+
+              {picked &&
+                (byDate[picked] ? (
+                  <article className="day-card">
+                    <h3 className="day-title">
+                      {parseKey(picked).m}月{parseKey(picked).d}日（{parseKey(picked).w}）
+                    </h3>
+                    {byDate[picked].lines.map((l, i) =>
+                      l ? (
+                        <div key={i} className={`day-line line-${i}`}>
+                          <span className="tag">
+                            <i aria-hidden="true">{PROMPTS[i].icon}</i>
+                            {PROMPTS[i].label}
+                          </span>
+                          <p className="day-text">{l}</p>
+                        </div>
+                      ) : null
+                    )}
+                    {pickedPhoto && <img className="card-photo" src={pickedPhoto} alt="この日の写真" />}
+                    <div className="card-actions">
+                      <button
+                        type="button"
+                        className="act"
+                        onClick={() => {
+                          setTab("write");
+                          loadDate(picked);
+                        }}
+                      >
+                        書きなおす
+                      </button>
+                      {confirmId === byDate[picked].id ? (
+                        <button type="button" className="act danger" onClick={() => remove(byDate[picked])}>
+                          ほんとうに消す
+                        </button>
+                      ) : (
+                        <button type="button" className="act" onClick={() => setConfirmId(byDate[picked].id)}>
+                          消す
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ) : (
+                  <article className="day-card empty-day">
+                    <h3 className="day-title">
+                      {parseKey(picked).m}月{parseKey(picked).d}日（{parseKey(picked).w}）
+                    </h3>
+                    <p className="day-empty">この日は まだ からっぽです。</p>
+                    <button
+                      type="button"
+                      className="act"
+                      onClick={() => {
+                        setTab("write");
+                        loadDate(picked);
+                      }}
+                    >
+                      この日のことを書く
+                    </button>
+                  </article>
+                ))}
+            </>
+          )}
+        </main>
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+/* ---------- みため ---------- */
+
+const CSS = `
+.app{
+  --milk:#FFF9F4;
+  --cream:#FFFFFF;
+  --ink:#5B4A55;
+  --soft:#A79AA3;
+  --peach:#F7A8A0;
+  --peach-deep:#EC8A83;
+  --mint:#8FD0C0;
+  --butter:#FFDF9E;
+  --lilac:#C9BCEB;
+  --edge:#F1E3DC;
+  --maru:"Hiragino Maru Gothic ProN","ヒラギノ丸ゴ ProN W4","Hiragino Sans","Yu Gothic",system-ui,sans-serif;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(201,188,235,.18), transparent 42%),
+    radial-gradient(circle at 88% 4%, rgba(143,208,192,.18), transparent 38%),
+    var(--milk);
+  color:var(--ink); min-height:100vh; padding:22px 16px 72px; box-sizing:border-box;
+  font-family:var(--maru); -webkit-font-smoothing:antialiased;
+}
+.app *{box-sizing:border-box;}
+.app button:focus-visible,.app input:focus-visible,.app textarea:focus-visible{
+  outline:3px solid var(--lilac); outline-offset:2px;
+}
+
+.head{max-width:560px; margin:0 auto 16px; text-align:center;}
+.brand{
+  font-size:21px; font-weight:700; letter-spacing:.14em; margin:0;
+  display:inline-flex; align-items:center; gap:9px;
+}
+.brand-dots{display:inline-flex; gap:4px;}
+.brand-dots i{width:7px; height:7px; border-radius:50%; display:block;}
+.brand-dots i:nth-child(1){background:var(--peach);}
+.brand-dots i:nth-child(2){background:var(--butter);}
+.brand-dots i:nth-child(3){background:var(--mint);}
+.brand-sub{margin:6px 0 16px; font-size:11.5px; color:var(--soft); letter-spacing:.16em;}
+
+.tabs{
+  display:inline-flex; gap:4px; padding:4px; border-radius:999px;
+  background:#FFF; box-shadow:0 2px 10px rgba(196,164,158,.18);
+}
+.tab{
+  border:0; cursor:pointer; padding:8px 20px; border-radius:999px;
+  background:transparent; color:var(--soft); font-family:var(--maru);
+  font-size:13.5px; font-weight:700; letter-spacing:.1em; transition:all .18s ease;
+}
+.tab.on{background:var(--peach); color:#fff; box-shadow:0 3px 8px rgba(236,138,131,.32);}
+
+.sheet{
+  max-width:560px; margin:0 auto; background:var(--cream);
+  border-radius:26px; padding:20px 18px 22px;
+  box-shadow:0 10px 26px rgba(196,164,158,.16);
+}
+
+.chip-wrap{position:relative;}
+.chip{
+  display:flex; align-items:center; gap:12px; width:100%; cursor:pointer;
+  background:linear-gradient(180deg,#FFF6F2,#FFEFEA); border:0; border-radius:20px;
+  padding:12px 16px; text-align:left; font-family:var(--maru); color:var(--ink);
+}
+.chip:active{transform:scale(.99);}
+.chip-day{
+  font-size:26px; font-weight:700; color:var(--peach-deep);
+  min-width:40px; text-align:center; line-height:1;
+}
+.chip-meta{flex:1 1 auto;}
+.chip-meta b{display:block; font-size:12.5px; font-weight:700;}
+.chip-meta i{display:block; font-style:normal; font-size:11px; color:var(--soft); margin-top:2px;}
+.chip-seed{font-size:20px;}
+.chip-input{position:absolute; left:16px; bottom:0; width:1px; height:1px; opacity:0; border:0;}
+
+.line{display:block; padding:14px 6px 10px; border-bottom:2px dotted var(--edge);}
+.tag{
+  display:inline-flex; vertical-align:top; align-items:center; gap:5px; border-radius:999px;
+  padding:4px 11px 4px 8px; font-size:11px; font-weight:700; letter-spacing:.04em;
+  margin-bottom:7px;
+}
+.tag i{font-style:normal; font-size:12px; line-height:1;}
+.line-0 .tag,.day-line.line-0 .tag{background:#FFEDE9; color:#D9736C;}
+.line-1 .tag,.day-line.line-1 .tag{background:#E7F6F1; color:#4E9E8B;}
+.line-2 .tag,.day-line.line-2 .tag{background:#EFEBFB; color:#8878C4;}
+.line-input{
+  display:block; width:100%; border:0; background:transparent; resize:none; overflow:hidden;
+  font-family:var(--maru); font-size:15.5px; line-height:1.75; color:var(--ink); padding:0 2px;
+}
+.line-input::placeholder{color:#D6C8C6;}
+
+.photo-add{
+  margin-top:18px; width:100%; padding:16px; cursor:pointer;
+  background:#FFFCF7; border:2px dashed var(--edge); border-radius:20px;
+  font-family:var(--maru); font-size:13px; font-weight:700; color:var(--soft); letter-spacing:.06em;
+}
+.photo-add:active{background:#FFF7EF;}
+.photo{margin:18px 0 0; position:relative;}
+.photo img{width:100%; display:block; border-radius:20px;}
+.photo-remove{
+  position:absolute; right:10px; bottom:10px; cursor:pointer;
+  background:rgba(255,255,255,.92); color:var(--ink); border:0; border-radius:999px;
+  padding:7px 14px; font-size:12px; font-weight:700; font-family:var(--maru);
+  box-shadow:0 2px 6px rgba(91,74,85,.18);
+}
+.hidden-input{display:none;}
+
+.notice{margin:14px 4px 0; font-size:12.5px; color:var(--peach-deep); line-height:1.7;}
+.save{
+  margin-top:20px; width:100%; padding:15px; cursor:pointer; border:0; border-radius:999px;
+  background:linear-gradient(180deg,#FBB3AB,#F0918A); color:#fff;
+  font-family:var(--maru); font-size:15px; font-weight:700; letter-spacing:.24em;
+  box-shadow:0 6px 14px rgba(236,138,131,.34);
+}
+.save:active{transform:translateY(1px);}
+.save:disabled{opacity:.6; box-shadow:none;}
+
+.review{max-width:560px; margin:0 auto;}
+.search{
+  display:flex; align-items:center; gap:8px; background:#fff; border-radius:999px;
+  padding:11px 18px; box-shadow:0 4px 12px rgba(196,164,158,.16);
+}
+.search-icon{font-size:13px;}
+.search input{
+  flex:1 1 auto; border:0; background:transparent; font-family:var(--maru);
+  font-size:14.5px; color:var(--ink); padding:2px 0;
+}
+.search input::placeholder{color:#D6C8C6;}
+.count{margin:10px 6px 18px; font-size:11.5px; color:var(--soft); letter-spacing:.08em;}
+
+.cal-head{display:flex; align-items:center; justify-content:center; gap:16px; margin:14px 0 10px;}
+.cal-title{margin:0; font-size:14px; font-weight:700; letter-spacing:.12em;}
+.cal-title b{font-size:22px; color:var(--peach-deep); margin:0 2px;}
+.cal-arrow{
+  width:34px; height:34px; border-radius:50%; border:0; cursor:pointer;
+  background:#fff; color:var(--peach-deep); font-size:18px; line-height:1;
+  box-shadow:0 3px 9px rgba(196,164,158,.2);
+}
+.cal-arrow:active{transform:scale(.94);}
+
+.cal{background:#fff; border-radius:24px; padding:14px 10px 16px; box-shadow:0 6px 16px rgba(196,164,158,.16);}
+.cal-week{display:grid; grid-template-columns:repeat(7,1fr); margin-bottom:6px;}
+.cal-wd{text-align:center; font-size:10.5px; font-weight:700; color:var(--soft);}
+.cal-wd.wd-日{color:var(--peach-deep);}
+.cal-wd.wd-土{color:#7FB2CE;}
+.cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:3px;}
+.cal-blank{display:block;}
+.cal-day{
+  position:relative; aspect-ratio:1/1; width:100%; border:0; cursor:pointer;
+  background:transparent; border-radius:14px; padding:0;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
+  font-family:var(--maru); color:var(--ink); transition:background .16s ease;
+}
+.cal-day:disabled{opacity:.32; cursor:default;}
+.cal-num{font-size:12px; font-weight:700;}
+.cal-day.has{background:#FFF4EF;}
+.cal-day.has .cal-num{color:var(--peach-deep);}
+.cal-seed{font-size:13px; line-height:1;}
+.cal-thumb{width:20px; height:20px; border-radius:7px; object-fit:cover;}
+.cal-day.today{box-shadow:inset 0 0 0 2px var(--mint);}
+.cal-day.picked{background:var(--peach); }
+.cal-day.picked .cal-num{color:#fff;}
+
+.day-card{
+  background:#fff; border-radius:22px; padding:16px 18px 18px; margin-top:4px;
+  box-shadow:0 6px 16px rgba(196,164,158,.18); animation:pop .22s cubic-bezier(.34,1.56,.64,1);
+}
+.day-title{margin:0 0 10px; font-size:13px; font-weight:700; letter-spacing:.1em; color:var(--soft);}
+.day-line{margin:0 0 12px;}
+.day-text{margin:0; font-size:15px; line-height:1.8; word-break:break-word; padding-left:2px;}
+.day-line .tag{margin-bottom:5px;}
+.day-empty{margin:0 0 14px; font-size:13.5px; color:var(--soft);}
+.empty-day .act{background:#FFF4EF; color:var(--peach-deep);}
+
+.group{margin-bottom:22px;}
+.group-label{
+  font-size:12px; font-weight:700; letter-spacing:.18em; color:var(--soft); margin:0 6px 9px;
+}
+.card{
+  background:#fff; border-radius:22px; margin-bottom:10px;
+  box-shadow:0 4px 12px rgba(196,164,158,.14); overflow:hidden;
+}
+.card-head{
+  display:flex; gap:12px; align-items:flex-start; width:100%; text-align:left;
+  background:none; border:0; padding:15px 16px; cursor:pointer; font-family:var(--maru); color:var(--ink);
+}
+.card-date{flex:0 0 40px; text-align:center;}
+.card-date b{display:block; font-size:20px; font-weight:700; color:var(--peach-deep); line-height:1.1;}
+.card-date i{display:block; font-style:normal; font-size:10px; color:var(--soft); margin-top:3px;}
+.card-lines{flex:1 1 auto; min-width:0;}
+.card-line{display:block; font-size:14px; line-height:1.8; word-break:break-word;}
+.card-line .mini{font-style:normal; font-size:11px; margin-right:5px; opacity:.9;}
+.card-thumb{flex:0 0 48px; width:48px; height:48px; object-fit:cover; border-radius:14px;}
+.card-seed{flex:0 0 auto; font-size:17px; opacity:.75;}
+.card-open{padding:0 16px 16px 68px;}
+.card-photo{width:100%; display:block; border-radius:18px; margin-bottom:12px;}
+.card-actions{display:flex; gap:8px;}
+.act{
+  background:#FFF7F3; border:0; border-radius:999px; cursor:pointer;
+  padding:9px 16px; font-size:12.5px; font-weight:700; font-family:var(--maru); color:var(--ink);
+}
+.act.danger{background:#FDE7E4; color:var(--peach-deep);}
+
+.empty{
+  text-align:center; font-size:14px; color:var(--soft); line-height:2.1;
+  padding:36px 0; margin:0;
+}
+mark{background:linear-gradient(180deg,transparent 58%, var(--butter) 58%); color:inherit; border-radius:2px;}
+
+.toast{
+  position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+  background:#fff; color:var(--ink); padding:12px 24px; border-radius:999px;
+  font-size:13.5px; font-weight:700; letter-spacing:.08em; font-family:var(--maru);
+  box-shadow:0 8px 20px rgba(196,164,158,.34); animation:pop .26s cubic-bezier(.34,1.56,.64,1);
+}
+@keyframes pop{from{opacity:0; transform:translate(-50%,10px) scale(.94);} to{opacity:1; transform:translate(-50%,0) scale(1);}}
+@media (prefers-reduced-motion: reduce){ .app *{animation:none !important; transition:none !important;} }
+
+@media (max-width:420px){
+  .sheet{padding:16px 14px 20px; border-radius:22px;}
+  .line-input{font-size:15px;}
+}
+`;
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
